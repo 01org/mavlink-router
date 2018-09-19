@@ -99,58 +99,26 @@ void ULog::stop()
     LogEndpoint::stop();
 }
 
+bool ULog::accept_msg(const struct buffer *buffer)
+{
+    return LogEndpoint::accept_msg(buffer)
+        && (buffer->msgid == MAVLINK_MSG_ID_COMMAND_ACK
+            || buffer->msgid == MAVLINK_MSG_ID_LOGGING_DATA_ACKED
+            || buffer->msgid == MAVLINK_MSG_ID_LOGGING_DATA);
+}
+
 int ULog::write_msg(const struct buffer *buffer)
 {
     const bool mavlink2 = buffer->data[0] == MAVLINK_STX;
-    uint32_t msg_id;
-    uint8_t *payload;
-    uint16_t payload_len;
+    uint8_t payload_len;
     uint8_t trimmed_zeros;
-    uint8_t source_system_id;
-    uint8_t source_component_id;
 
-
-    if (mavlink2) {
-        struct mavlink_router_mavlink2_header *msg
-            = (struct mavlink_router_mavlink2_header *)buffer->data;
-        msg_id = msg->msgid;
-        payload = buffer->data + sizeof(struct mavlink_router_mavlink2_header);
-        payload_len = msg->payload_len;
-        source_system_id = msg->sysid;
-        source_component_id = msg->compid;
-    } else {
-        struct mavlink_router_mavlink1_header *msg
-            = (struct mavlink_router_mavlink1_header *)buffer->data;
-        msg_id = msg->msgid;
-        payload = buffer->data + sizeof(struct mavlink_router_mavlink1_header);
-        payload_len = msg->payload_len;
-        source_system_id = msg->sysid;
-        source_component_id = msg->compid;
-    }
-
-    /* set the expected system id to the first autopilot that we get a heartbeat from */
-    if (_target_system_id == -1 && msg_id == MAVLINK_MSG_ID_HEARTBEAT
-        && source_component_id == MAV_COMP_ID_AUTOPILOT1) {
-        _target_system_id = source_system_id;
-    }
-
-    /* Check if we should start or stop logging */
-    _handle_auto_start_stop(msg_id, source_system_id, source_component_id, payload);
-
-    /* Check if we are interested in this msg_id */
-    if (msg_id != MAVLINK_MSG_ID_COMMAND_ACK && msg_id != MAVLINK_MSG_ID_LOGGING_DATA_ACKED
-        && msg_id != MAVLINK_MSG_ID_LOGGING_DATA) {
-        return buffer->len;
-    }
-
-    const mavlink_msg_entry_t *msg_entry = mavlink_get_msg_entry(msg_id);
+    const mavlink_msg_entry_t *msg_entry = mavlink_get_msg_entry(buffer->msgid);
     if (!msg_entry) {
         return buffer->len;
     }
 
-    if (payload_len > msg_entry->msg_len) {
-        payload_len = msg_entry->msg_len;
-    }
+    payload_len = std::min(buffer->payload_len, msg_entry->msg_len);
 
     if (mavlink2) {
         trimmed_zeros = get_trimmed_zeros(msg_entry, buffer);
@@ -159,11 +127,11 @@ int ULog::write_msg(const struct buffer *buffer)
     }
 
     /* Handle messages */
-    switch (msg_id) {
+    switch (buffer->msgid) {
     case MAVLINK_MSG_ID_COMMAND_ACK: {
         mavlink_command_ack_t cmd;
 
-        memcpy(&cmd, payload, payload_len);
+        memcpy(&cmd, buffer->payload, payload_len);
         if (trimmed_zeros)
             memset(((uint8_t *)&cmd) + payload_len, 0, trimmed_zeros);
 
@@ -181,7 +149,7 @@ int ULog::write_msg(const struct buffer *buffer)
         break;
     }
     case MAVLINK_MSG_ID_LOGGING_DATA_ACKED: {
-        mavlink_logging_data_acked_t *ulog_data_acked = (mavlink_logging_data_acked_t *)payload;
+        mavlink_logging_data_acked_t *ulog_data_acked = (mavlink_logging_data_acked_t *)buffer->payload;
         mavlink_message_t msg;
         mavlink_logging_ack_t ack;
 
@@ -196,11 +164,11 @@ int ULog::write_msg(const struct buffer *buffer)
     case MAVLINK_MSG_ID_LOGGING_DATA: {
         if (trimmed_zeros) {
             mavlink_logging_data_t ulog_data;
-            memcpy(&ulog_data, payload, payload_len);
+            memcpy(&ulog_data, buffer->payload, payload_len);
             memset(((uint8_t *)&ulog_data) + payload_len, 0, trimmed_zeros);
             _logging_data_process(&ulog_data);
         } else {
-            mavlink_logging_data_t *ulog_data = (mavlink_logging_data_t *)payload;
+            mavlink_logging_data_t *ulog_data = (mavlink_logging_data_t *)buffer->payload;
             _logging_data_process(ulog_data);
         }
         break;

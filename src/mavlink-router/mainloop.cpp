@@ -131,24 +131,25 @@ int Mainloop::write_msg(Endpoint *e, const struct buffer *buf)
     return r;
 }
 
-void Mainloop::route_msg(struct buffer *buf, int target_sysid, int target_compid, int sender_sysid,
-                         int sender_compid)
+void Mainloop::route_msg(const struct buffer *buf)
 {
     bool unknown = true;
 
     for (Endpoint **e = g_endpoints; *e != nullptr; e++) {
-        if ((*e)->accept_msg(target_sysid, target_compid, sender_sysid, sender_compid)) {
-            log_debug("Endpoint [%d] accepted message to %d/%d from %u/%u", (*e)->fd, target_sysid,
-                      target_compid, sender_sysid, sender_compid);
+        if ((*e)->accept_msg(buf)) {
+            log_debug("Endpoint [%d] accepted message to %d/%d from %u/%u", (*e)->fd,
+                      buf->target_sysid, buf->target_compid,
+                      buf->src_sysid, buf->src_compid);
             write_msg(*e, buf);
             unknown = false;
         }
     }
 
     for (struct endpoint_entry *e = g_tcp_endpoints; e; e = e->next) {
-        if (e->endpoint->accept_msg(target_sysid, target_compid, sender_sysid, sender_compid)) {
+        if (e->endpoint->accept_msg(buf)) {
             log_debug("Endpoint [%d] accepted message to %d/%d from %u/%u", e->endpoint->fd,
-                      target_sysid, target_compid, sender_sysid, sender_compid);
+                      buf->target_sysid, buf->target_compid,
+                      buf->src_sysid, buf->src_compid);
             int r = write_msg(e->endpoint, buf);
             if (r == -EPIPE) {
                 should_process_tcp_hangups = true;
@@ -159,7 +160,8 @@ void Mainloop::route_msg(struct buffer *buf, int target_sysid, int target_compid
 
     if (unknown) {
         _errors_aggregate.msg_to_unknown++;
-        log_debug("Message to unknown sysid/compid: %u/%u", target_sysid, target_compid);
+        log_debug("Message to unknown sysid/compid: %u/%u",
+                  buf->target_sysid, buf->target_compid);
     }
 }
 

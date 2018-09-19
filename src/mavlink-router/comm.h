@@ -27,4 +27,13 @@
 struct buffer {
     unsigned int len;
     uint8_t *data;
+    uint8_t *payload;
+
+    /* Data relevant for the last parsed msg available on this buffer */
+    uint32_t msgid;
+    int target_sysid;
+    int target_compid;
+    uint8_t src_sysid;
+    uint8_t src_compid;
+    uint8_t payload_len;
 };

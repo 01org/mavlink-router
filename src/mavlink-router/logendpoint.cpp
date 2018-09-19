@@ -41,13 +41,21 @@
 void LogEndpoint::_send_msg(const mavlink_message_t *msg, int target_sysid)
 {
     uint8_t data[MAVLINK_MAX_PACKET_LEN];
-    struct buffer buffer {
-        0, data
-    };
+    struct buffer buffer = {};
+
+    /*
+     * payload is only used by the internal log endpoints,
+     * don't bother adding them
+     */
+    buffer.data = data;
+    buffer.msgid = msg->msgid;
+    buffer.target_sysid = target_sysid;
+    buffer.target_compid = MAV_COMP_ID_ALL;
+    buffer.src_sysid = msg->sysid;
+    buffer.src_compid = msg->compid;
 
     buffer.len = mavlink_msg_to_send_buffer(data, msg);
-    Mainloop::get_instance().route_msg(&buffer, target_sysid, MAV_COMP_ID_ALL, msg->sysid,
-                                       msg->compid);
+    Mainloop::get_instance().route_msg(&buffer);
 
     _stat.read.total++;
     _stat.read.handled++;
@@ -212,28 +220,43 @@ bool LogEndpoint::_start_alive_timeout()
     return !!_alive_check_timeout;
 }
 
-void LogEndpoint::_handle_auto_start_stop(uint32_t msg_id, uint8_t source_system_id,
-        uint8_t source_component_id, uint8_t *payload)
+void LogEndpoint::_handle_auto_start_stop(const struct buffer *buf)
 {
-    if (_target_system_id == -1) { // wait until initialized
+    /* set the expected system id to the first autopilot that we get a heartbeat from */
+    if (_target_system_id == -1 && buf->msgid == MAVLINK_MSG_ID_HEARTBEAT
+        && buf->src_compid == MAV_COMP_ID_AUTOPILOT1) {
+        _target_system_id = buf->src_sysid;
+    }
+
+    if (_target_system_id == -1) {
+        // wait until initialized
         return;
     }
+
     if (_mode == LogMode::always) {
         if (_file == -1) {
-            if (!start()) _mode = LogMode::disabled;
+            if (!start())
+                _mode = LogMode::disabled;
         }
-    } else if (_mode == LogMode::while_armed) {
-        if (msg_id == MAVLINK_MSG_ID_HEARTBEAT && source_system_id == _target_system_id
-            && source_component_id == MAV_COMP_ID_AUTOPILOT1) {
 
-            const mavlink_heartbeat_t *heartbeat = (mavlink_heartbeat_t *)payload;
-            const bool is_armed = heartbeat->system_status == MAV_STATE_ACTIVE;
+        return;
+    }
 
-            if (_file == -1 && is_armed) {
-                if (!start()) _mode = LogMode::disabled;
-            } else if (_file != -1 && !is_armed) {
-                stop();
-            }
-        }
+    if (_mode != LogMode::while_armed)
+        return;
+
+    if (buf->msgid != MAVLINK_MSG_ID_HEARTBEAT
+        || buf->src_sysid != _target_system_id
+        || buf->src_compid != MAV_COMP_ID_AUTOPILOT1)
+        return;
+
+    const mavlink_heartbeat_t *heartbeat = (mavlink_heartbeat_t *)buf->payload;
+    const bool is_armed = heartbeat->system_status == MAV_STATE_ACTIVE;
+
+    if (_file == -1 && is_armed) {
+        if (!start())
+            _mode = LogMode::disabled;
+    } else if (_file != -1 && !is_armed) {
+        stop();
     }
 }

@@ -30,6 +30,7 @@ public:
 
     bool start() override;
     void stop() override;
+    bool accept_msg(const struct buffer *pbuf) override;
 
     int write_msg(const struct buffer *pbuf) override;
     int flush_pending_msgs() override { return -ENOSYS; }

@@ -42,11 +42,21 @@ public:
         , _mode(mode)
     {
         assert(_logs_dir);
-        _add_sys_comp_id(LOG_ENDPOINT_SYSTEM_ID << 8);
+        _add_sys_comp_id(LOG_ENDPOINT_SYSTEM_ID, 0);
     }
 
     virtual bool start();
     virtual void stop();
+
+    virtual bool accept_msg(const struct buffer *buffer) override
+    {
+        if (!Endpoint::accept_msg(buffer))
+            return false;
+
+        _handle_auto_start_stop(buffer);
+
+        return true;
+    }
 
 protected:
     const char *_logs_dir;
@@ -67,8 +77,7 @@ protected:
     virtual bool _start_timeout() = 0;
     virtual bool _alive_timeout();
 
-    void _handle_auto_start_stop(uint32_t msg_id, uint8_t source_system_id,
-            uint8_t source_component_id, uint8_t *payload);
+    void _handle_auto_start_stop(const struct buffer *buf);
 
 private:
     int _get_file(const char *extension);

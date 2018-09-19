@@ -35,8 +35,7 @@ public:
     int mod_fd(int fd, void *data, int events);
     int remove_fd(int fd);
     void loop();
-    void route_msg(struct buffer *buf, int target_sysid, int target_compid, int sender_sysid,
-                   int sender_compid);
+    void route_msg(const struct buffer *buf);
     void handle_read(Endpoint *e);
     void handle_canwrite(Endpoint *e);
     void handle_tcp_connection();

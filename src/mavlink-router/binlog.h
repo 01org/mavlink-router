@@ -31,6 +31,7 @@ public:
 
     bool start() override;
     void stop() override;
+    bool accept_msg(const struct buffer *pbuf) override;
 
     bool logging_start_timeout();
 

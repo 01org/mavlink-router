@@ -68,19 +68,16 @@ bool Endpoint::handle_canwrite()
 
 int Endpoint::handle_read()
 {
-    int target_sysid, target_compid, r;
-    uint8_t src_sysid, src_compid;
+    int r;
     struct buffer buf{};
 
-    while ((r = read_msg(&buf, &target_sysid, &target_compid, &src_sysid, &src_compid)) > 0)
-        Mainloop::get_instance().route_msg(&buf, target_sysid, target_compid, src_sysid,
-                                           src_compid);
+    while ((r = read_msg(&buf)) > 0)
+        Mainloop::get_instance().route_msg(&buf);
 
     return r;
 }
 
-int Endpoint::read_msg(struct buffer *pbuf, int *target_sysid, int *target_compid,
-                       uint8_t *src_sysid, uint8_t *src_compid)
+int Endpoint::read_msg(struct buffer *pbuf)
 {
     bool should_read_more = true;
     uint32_t msg_id;
@@ -172,11 +169,11 @@ int Endpoint::read_msg(struct buffer *pbuf, int *target_sysid, int *target_compi
             return 0;
 
         msg_id = hdr->msgid;
-        payload = rx_buf.data + sizeof(*hdr);
+        pbuf->payload = payload = rx_buf.data + sizeof(*hdr);
         seq = hdr->seq;
-        *src_sysid = hdr->sysid;
-        *src_compid = hdr->compid;
-        payload_len = hdr->payload_len;
+        pbuf->src_sysid = hdr->sysid;
+        pbuf->src_compid = hdr->compid;
+        pbuf->payload_len = payload_len = hdr->payload_len;
 
         expected_size = sizeof(*hdr);
         expected_size += hdr->payload_len;
@@ -191,11 +188,11 @@ int Endpoint::read_msg(struct buffer *pbuf, int *target_sysid, int *target_compi
             return 0;
 
         msg_id = hdr->msgid;
-        payload = rx_buf.data + sizeof(*hdr);
+        pbuf->payload = payload = rx_buf.data + sizeof(*hdr);
         seq = hdr->seq;
-        *src_sysid = hdr->sysid;
-        *src_compid = hdr->compid;
-        payload_len = hdr->payload_len;
+        pbuf->src_sysid = hdr->sysid;
+        pbuf->src_compid = hdr->compid;
+        pbuf->payload_len = payload_len = hdr->payload_len;
 
         expected_size = sizeof(*hdr);
         expected_size += hdr->payload_len;
@@ -231,11 +228,11 @@ int Endpoint::read_msg(struct buffer *pbuf, int *target_sysid, int *target_compi
     _stat.read.handled_bytes += expected_size;
 
     if (!_crc_check_enabled || msg_entry) {
-        _add_sys_comp_id(((uint16_t)*src_sysid << 8) | *src_compid);
+        _add_sys_comp_id(pbuf->src_sysid, pbuf->src_compid);
     }
 
-    *target_sysid = -1;
-    *target_compid = -1;
+    pbuf->target_sysid = -1;
+    pbuf->target_compid = -1;
 
     if (msg_entry == nullptr) {
         log_debug("No message entry for %u", msg_id);
@@ -243,17 +240,17 @@ int Endpoint::read_msg(struct buffer *pbuf, int *target_sysid, int *target_compi
         if (msg_entry->flags & MAV_MSG_ENTRY_FLAG_HAVE_TARGET_SYSTEM) {
             // if target_system is 0, it may have been trimmed out on mavlink2
             if (msg_entry->target_system_ofs < payload_len) {
-                *target_sysid = payload[msg_entry->target_system_ofs];
+                pbuf->target_sysid = payload[msg_entry->target_system_ofs];
             } else {
-                *target_sysid = 0;
+                pbuf->target_sysid = 0;
             }
         }
         if (msg_entry->flags & MAV_MSG_ENTRY_FLAG_HAVE_TARGET_COMPONENT) {
             // if target_system is 0, it may have been trimmed out on mavlink2
             if (msg_entry->target_component_ofs < payload_len) {
-                *target_compid = payload[msg_entry->target_component_ofs];
+                pbuf->target_compid = payload[msg_entry->target_component_ofs];
             } else {
-                *target_compid = 0;
+                pbuf->target_compid = 0;
             }
         }
     }
@@ -281,8 +278,10 @@ int Endpoint::read_msg(struct buffer *pbuf, int *target_sysid, int *target_compi
     return msg_entry != nullptr ? ReadOk : ReadUnkownMsg;
 }
 
-void Endpoint::_add_sys_comp_id(uint16_t sys_comp_id)
+void Endpoint::_add_sys_comp_id(uint8_t sysid, uint8_t compid)
 {
+    uint16_t sys_comp_id = sysid << 8 | compid;
+
     if (has_sys_comp_id(sys_comp_id))
         return;
 
@@ -308,12 +307,12 @@ bool Endpoint::has_sys_comp_id(unsigned sys_comp_id)
     return false;
 }
 
-bool Endpoint::accept_msg(int target_sysid, int target_compid, uint8_t src_sysid,
-                          uint8_t src_compid)
+bool Endpoint::accept_msg(const struct buffer *pbuf)
 {
     if (Log::get_max_level() >= Log::Level::DEBUG) {
-        log_debug("Endpoint [%d] got message to %d/%d from %u/%u", fd, target_sysid, target_compid,
-                  src_sysid, src_compid);
+        log_debug("Endpoint [%d] got message to %d/%d from %u/%u", fd,
+                  pbuf->target_sysid, pbuf->target_compid,
+                  pbuf->src_sysid, pbuf->src_compid);
         log_debug("\tKnown endpoints:");
         for (auto it = _sys_comp_ids.begin(); it != _sys_comp_ids.end(); it++) {
             log_debug("\t\t%u/%u", (*it >> 8), *it & 0xff);
@@ -322,19 +321,20 @@ bool Endpoint::accept_msg(int target_sysid, int target_compid, uint8_t src_sysid
 
     // This endpoint sent the message, we don't want to send it back over the
     // same channel to avoid loops: reject
-    if (has_sys_comp_id(src_sysid, src_compid))
+    if (has_sys_comp_id(pbuf->src_sysid, pbuf->src_compid))
         return false;
 
     // Message is broadcast on sysid: accept msg
-    if (target_sysid == 0 || target_sysid == -1)
+    if (pbuf->target_sysid == 0 || pbuf->target_sysid == -1)
         return true;
 
     // This endpoint has the target of message (sys and comp id): accept
-    if (target_compid > 0 && has_sys_comp_id(target_sysid, target_compid))
+    if (pbuf->target_compid > 0 &&
+        has_sys_comp_id(pbuf->target_sysid, pbuf->target_compid))
         return true;
 
     // This endpoint has the target of message (sysid, but compid is broadcast): accept
-    if (has_sys_id(target_sysid))
+    if (has_sys_id(pbuf->target_sysid))
         return true;
 
     // Reject everything else
@@ -570,10 +570,9 @@ bool UartEndpoint::_change_baud_cb(void *data)
     return true;
 }
 
-int UartEndpoint::read_msg(struct buffer *pbuf, int *target_sysid, int *target_compid,
-                           uint8_t *src_sysid, uint8_t *src_compid)
+int UartEndpoint::read_msg(struct buffer *pbuf)
 {
-    int ret = Endpoint::read_msg(pbuf, target_sysid, target_compid, src_sysid, src_compid);
+    int ret = Endpoint::read_msg(pbuf);
 
     if (_change_baud_timeout != nullptr && ret == ReadOk) {
         log_info("Baudrate %lu responded, keeping it", _baudrates[_current_baud_idx]);
