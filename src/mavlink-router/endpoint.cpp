@@ -670,7 +670,7 @@ UdpEndpoint::UdpEndpoint()
     bzero(&sockaddr, sizeof(sockaddr));
 }
 
-int UdpEndpoint::open(const char *ip, unsigned long port, bool to_bind)
+int UdpEndpoint::open(const char *ip, unsigned long port, UdpEndpoint::UdpMode mode)
 {
     const int broadcast_val = 1;
     fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -683,7 +683,9 @@ int UdpEndpoint::open(const char *ip, unsigned long port, bool to_bind)
     sockaddr.sin_addr.s_addr = inet_addr(ip);
     sockaddr.sin_port = htons(port);
 
-    if (to_bind) {
+    _mode = mode;
+
+    if (_mode == UdpEndpoint::Eavesdropping) {
         if (bind(fd, (struct sockaddr *)&sockaddr, sizeof(sockaddr)) < 0) {
             log_error("Error binding socket (%m)");
             goto fail;
@@ -700,9 +702,11 @@ int UdpEndpoint::open(const char *ip, unsigned long port, bool to_bind)
         goto fail;
     }
 
-    if (to_bind)
+    if (_mode == UdpEndpoint::Eavesdropping)
         sockaddr.sin_port = 0;
-    log_info("Open UDP [%d] %s:%lu %c", fd, ip, port, to_bind ? '*' : ' ');
+    log_info("Open UDP [%d] %s:%lu%s%s", fd, ip, port,
+        _mode == UdpEndpoint::Eavesdropping ? " *" : "",
+        _mode == UdpEndpoint::Broadcast ? " B" : "");
 
     return fd;
 
@@ -717,8 +721,12 @@ fail:
 ssize_t UdpEndpoint::_read_msg(uint8_t *buf, size_t len)
 {
     socklen_t addrlen = sizeof(sockaddr);
-    ssize_t r = ::recvfrom(fd, buf, len, 0,
-                           (struct sockaddr *)&sockaddr, &addrlen);
+    ssize_t r;
+    if (_mode == UdpEndpoint::Broadcast)
+        r = ::recv(fd, buf, len, 0);
+    else
+        r = ::recvfrom(fd, buf, len, 0,
+                                (struct sockaddr *)&sockaddr, &addrlen);
     if (r == -1 && errno == EAGAIN)
         return 0;
     if (r == -1)
