@@ -63,6 +63,7 @@ Endpoint::~Endpoint()
 {
     free(rx_buf.data);
     free(tx_buf.data);
+    del_expire_timer();
 }
 
 bool Endpoint::handle_canwrite()
@@ -328,8 +329,8 @@ bool Endpoint::accept_msg(int target_sysid, int target_compid, uint8_t src_sysid
     if (has_sys_comp_id(src_sysid, src_compid))
         return false;
 
-    if (msg_id != UINT32_MAX && 
-        _message_filter.size() > 0 && 
+    if (msg_id != UINT32_MAX &&
+        _message_filter.size() > 0 &&
         std::find(_message_filter.begin(), _message_filter.end(), msg_id) == _message_filter.end()) {
 
         // if filter is defined and message is not in the set then discard it
@@ -350,6 +351,22 @@ bool Endpoint::accept_msg(int target_sysid, int target_compid, uint8_t src_sysid
 
     // Reject everything else
     return false;
+}
+
+void Endpoint::postprocess_msg(int target_sysid, int target_compid, uint8_t src_sysid,
+                               uint8_t src_compid, uint32_t msg_id)
+{
+    // avoid unused variable messages
+    (void)target_sysid;
+    (void)target_compid;
+    (void)src_sysid;
+    (void)src_compid;
+
+    if (msg_id != UINT32_MAX && _message_nodelay.size() > 0 &&
+        std::find(_message_nodelay.begin(), _message_nodelay.end(), msg_id) != _message_nodelay.end()) {
+        // if filter is defined and message is not in the set then discard it
+        flush_pending_msgs();
+    }
 }
 
 bool Endpoint::_check_crc(const mavlink_msg_entry_t *msg_entry)
@@ -423,6 +440,37 @@ void Endpoint::log_aggregate(unsigned int interval_sec)
         log_warning("Endpoint %s [%d]: %u incomplete messages in the last %d seconds", _name, fd,
                     _incomplete_msgs, interval_sec);
         _incomplete_msgs = 0;
+    }
+}
+
+static bool _expired(void *data)
+{
+    log_warning("Endpoint expired.");
+    Mainloop::get_instance().remove_dynamic_endpoint(static_cast<Endpoint *>(data));
+    return true;
+}
+
+constexpr int expire_timeout = 30 * MSEC_PER_SEC;
+
+void Endpoint::start_expire_timer()
+{
+    _expire_timer = Mainloop::get_instance().add_timeout(
+        expire_timeout,
+        std::bind(&_expired, this),
+        this);
+}
+
+void Endpoint::reset_expire_timer()
+{
+    log_info("Resetting dynamic endpoint timer");
+    Mainloop::get_instance().set_timeout(_expire_timer, expire_timeout);
+}
+
+void Endpoint::del_expire_timer()
+{
+    if (_expire_timer) {
+        Mainloop::get_instance().del_timeout(_expire_timer);
+        _expire_timer = nullptr;
     }
 }
 
@@ -727,12 +775,31 @@ int UartEndpoint::add_speeds(std::vector<unsigned long> bauds)
 }
 
 UdpEndpoint::UdpEndpoint()
-    : Endpoint{"UDP"}
+    : Endpoint{"UDP"},
+    _write_scheduled(false),
+    _max_packet_size(0),
+    _max_timeout_ms(0)
 {
     bzero(&sockaddr, sizeof(sockaddr));
 #ifdef ENABLE_IPV6
     bzero(&sockaddr6, sizeof(sockaddr6));
 #endif
+    _write_schedule_timer = Mainloop::get_instance().add_timeout(
+        _max_timeout_ms, [this](void*)
+            {
+                flush_pending_msgs();
+                return true;
+            },
+        this);
+}
+
+
+UdpEndpoint::~UdpEndpoint()
+{
+    if (_write_schedule_timer) {
+        Mainloop::get_instance().del_timeout(_write_schedule_timer);
+        _write_schedule_timer = nullptr;
+    }
 }
 
 int UdpEndpoint::open(const char *ip, unsigned long port, bool to_bind)
@@ -845,6 +912,12 @@ fail:
     return -1;
 }
 
+void UdpEndpoint::set_coalescing(unsigned int bytes, unsigned int milliseconds)
+{
+    _max_packet_size = bytes;
+    _max_timeout_ms = milliseconds;
+}
+
 ssize_t UdpEndpoint::_read_msg(uint8_t *buf, size_t len)
 {
     socklen_t addrlen = sizeof(sockaddr);
@@ -870,14 +943,42 @@ ssize_t UdpEndpoint::_read_msg(uint8_t *buf, size_t len)
 
 int UdpEndpoint::write_msg(const struct buffer *pbuf)
 {
+    if (tx_buf.len > 0 && tx_buf.len + pbuf->len > _max_packet_size) {
+        flush_pending_msgs();
+    }
+
+    if (tx_buf.len + pbuf->len > TX_BUF_MAX_SIZE) {
+        log_debug("Dropping message, tx buffer full");
+        return 0;
+    }
+
+    memcpy(&tx_buf.data[tx_buf.len], pbuf->data, pbuf->len);
+    tx_buf.len += pbuf->len;
+
+    int ret = pbuf->len;
+
+    if (_max_packet_size == 0 || _max_timeout_ms == 0 || pbuf->len > _max_packet_size) {
+       ret = flush_pending_msgs();
+    }
+    else {
+        _schedule_write();
+    }
+    return ret;
+}
+
+int UdpEndpoint::flush_pending_msgs()
+{
+    Mainloop::get_instance().set_timeout(_write_schedule_timer, 0);
+    _write_scheduled = false;
+
+    if (tx_buf.len == 0) {
+        log_debug("No data in tx buffer, skipping write");
+        return 0;
+    }
+
     if (fd < 0) {
         log_error("Trying to write invalid fd");
         return -EINVAL;
-    }
-
-    /* TODO: send any pending data */
-    if (tx_buf.len > 0) {
-        ;
     }
 
 #ifdef ENABLE_IPV6
@@ -898,10 +999,10 @@ int UdpEndpoint::write_msg(const struct buffer *pbuf)
     ssize_t r = 0;
 #ifdef ENABLE_IPV6
     if (this->is_ipv6) {
-        r = ::sendto(fd, pbuf->data, pbuf->len, 0, (struct sockaddr *)&sockaddr6, sizeof(sockaddr6));
+        r = ::sendto(fd, tx_buf.data, tx_buf.len, 0, (struct sockaddr *)&sockaddr6, sizeof(sockaddr6));
     } else {
 #endif
-    r = ::sendto(fd, pbuf->data, pbuf->len, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+    r = ::sendto(fd, tx_buf.data, tx_buf.len, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
 #ifdef ENABLE_IPV6
     }
 #endif
@@ -913,17 +1014,23 @@ int UdpEndpoint::write_msg(const struct buffer *pbuf)
     };
 
     _stat.write.total++;
-    _stat.write.bytes += pbuf->len;
+    _stat.write.bytes += r;
 
-    /* Incomplete packet, we warn and discard the rest */
-    if (r != (ssize_t) pbuf->len) {
-        _incomplete_msgs++;
-        log_debug("Discarding packet, incomplete write %zd but len=%u", r, pbuf->len);
-    }
+    tx_buf.len = std::max(ssize_t(0), (ssize_t)tx_buf.len - r);
+    // memcpy isn't safe for overlapping regions
+    memmove(tx_buf.data, &tx_buf.data[r], tx_buf.len);
 
     log_debug("UDP [%d] wrote %zd bytes", fd, r);
 
     return r;
+}
+
+void UdpEndpoint::_schedule_write()
+{
+    if (!_write_scheduled) {
+        Mainloop::get_instance().set_timeout(_write_schedule_timer, _max_timeout_ms);
+        _write_scheduled = true;
+    }
 }
 
 TcpEndpoint::TcpEndpoint()
@@ -938,7 +1045,6 @@ TcpEndpoint::TcpEndpoint()
 TcpEndpoint::~TcpEndpoint()
 {
     close();
-    free(_ip);
 }
 
 int TcpEndpoint::accept(int listener_fd)
@@ -965,13 +1071,8 @@ int TcpEndpoint::accept(int listener_fd)
 
 int TcpEndpoint::open(const char *ip, unsigned long port)
 {
-    if (!_ip || strcmp(ip, _ip)) {
-        free(_ip);
-        _ip = strdup(ip);
-        _port = port;
-    }
-
-    assert_or_return(_ip, -ENOMEM);
+    _ip = ip;
+    _port = port;
 
 #ifdef ENABLE_IPV6
     this->is_ipv6 = Endpoint::is_ipv6(ip);
@@ -1137,3 +1238,4 @@ void TcpEndpoint::close()
 
     fd = -1;
 }
+

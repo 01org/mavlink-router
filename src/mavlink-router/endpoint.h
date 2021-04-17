@@ -97,8 +97,16 @@ public:
     }
 
     bool accept_msg(int target_sysid, int target_compid, uint8_t src_sysid, uint8_t src_compid, uint32_t msg_id);
+    void postprocess_msg(int target_sysid, int target_compid, uint8_t src_sysid, uint8_t src_compid, uint32_t msg_id);
 
     void add_message_to_filter(uint32_t msg_id) { _message_filter.push_back(msg_id); }
+    void add_message_to_nodelay(uint32_t msg_id) { _message_nodelay.push_back(msg_id); }
+
+    void start_expire_timer();
+
+    void reset_expire_timer();
+
+    void del_expire_timer();
 
     struct buffer rx_buf;
     struct buffer tx_buf;
@@ -141,7 +149,9 @@ protected:
     std::vector<uint16_t> _sys_comp_ids;
 
 private:
+    Timeout* _expire_timer = nullptr;
     std::vector<uint32_t> _message_filter;
+    std::vector<uint32_t> _message_nodelay;
 };
 
 class UartEndpoint : public Endpoint {
@@ -150,7 +160,7 @@ public:
         : Endpoint {"UART"}
     {
     }
-    virtual ~UartEndpoint();
+    ~UartEndpoint() override;
     int write_msg(const struct buffer *pbuf) override;
     int flush_pending_msgs() override { return -ENOSYS; }
 
@@ -175,12 +185,14 @@ private:
 class UdpEndpoint : public Endpoint {
 public:
     UdpEndpoint();
-    virtual ~UdpEndpoint() { }
+    ~UdpEndpoint() override;
 
     int write_msg(const struct buffer *pbuf) override;
-    int flush_pending_msgs() override { return -ENOSYS; }
+    int flush_pending_msgs() override;
 
     int open(const char *ip, unsigned long port, bool bind = false);
+
+    void set_coalescing(unsigned int bytes, unsigned int milliseconds);
 
     struct sockaddr_in sockaddr;
 #ifdef ENABLE_IPV6
@@ -189,13 +201,20 @@ public:
 #endif
 
 protected:
+
+    void _schedule_write();
+    bool _write_scheduled;
+
+    Timeout* _write_schedule_timer = nullptr;
+    unsigned int _max_packet_size, _max_timeout_ms;
+
     ssize_t _read_msg(uint8_t *buf, size_t len) override;
 };
 
 class TcpEndpoint : public Endpoint {
 public:
     TcpEndpoint();
-    ~TcpEndpoint();
+    ~TcpEndpoint() override;
 
     int accept(int listener_fd);
     int open(const char *ip, unsigned long port);
@@ -212,7 +231,7 @@ public:
     int retry_timeout = 0;
 
     inline const char *get_ip() {
-        return _ip;
+        return _ip.c_str();
     }
 
     inline unsigned long get_port() {
@@ -225,7 +244,7 @@ protected:
     ssize_t _read_msg(uint8_t *buf, size_t len) override;
 
 private:
-    char *_ip = nullptr;
+    std::string _ip;
     unsigned long _port = 0;
     bool _valid = true;
 };
