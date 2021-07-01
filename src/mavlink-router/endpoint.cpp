@@ -81,7 +81,7 @@ int Endpoint::handle_read()
 
     while ((r = read_msg(&buf, &target_sysid, &target_compid, &src_sysid, &src_compid, &msg_id)) > 0)
         Mainloop::get_instance().route_msg(&buf, target_sysid, target_compid, src_sysid,
-                                           src_compid, msg_id);
+                                           src_compid, msg_id, this);
 
     return r;
 }
@@ -427,6 +427,16 @@ void Endpoint::log_aggregate(unsigned int interval_sec)
     }
 }
 
+bool Endpoint::ipv4_is_multicast(const char *ip)
+{
+    /* multicast addresses start with 224 to 239 */
+    int ipFirstByte = atoi(ip);
+    if (224 <= ipFirstByte && ipFirstByte <= 239) {
+        return true;
+    }
+    return false;
+}
+
 #ifdef ENABLE_IPV6
 bool Endpoint::is_ipv6(const char *ip)
 {
@@ -439,8 +449,8 @@ bool Endpoint::is_ipv6(const char *ip)
 
 bool Endpoint::ipv6_is_linklocal(const char *ip)
 {
-    /* link-local addresses start with fe80 */
-    if (strncmp(ip, "fe80", 4) == 0) {
+    /* link-local addresses start with fe80, ULA addresses are in fc::/7 range */
+    if (strncmp(ip, "fe80", 4) == 0 || strncmp(ip, "fc", 2) == 0 || strncmp(ip, "fd", 2) == 0) {
         return true;
     }
     return false;
@@ -448,7 +458,7 @@ bool Endpoint::ipv6_is_linklocal(const char *ip)
 
 bool Endpoint::ipv6_is_multicast(const char *ip)
 {
-    /* link-local addresses start with ff0x */
+    /* multicast addresses start with ff0x */
     if (strncmp(ip, "ff0", 3) == 0) {
         return true;
     }
@@ -731,14 +741,18 @@ UdpEndpoint::UdpEndpoint()
     : Endpoint{"UDP"}
 {
     bzero(&sockaddr, sizeof(sockaddr));
+    bzero(&sockaddr_out, sizeof(sockaddr_out));
 #ifdef ENABLE_IPV6
     bzero(&sockaddr6, sizeof(sockaddr6));
+    bzero(&sockaddr6_out, sizeof(sockaddr6_out));
 #endif
 }
 
-int UdpEndpoint::open(const char *ip, unsigned long port, bool to_bind)
+int UdpEndpoint::open(const char *ip, unsigned long port, UdpEndpoint::UdpMode mode, const char *target_ip)
 {
+    this->_mode = mode;
     const int broadcast_val = 1;
+    char *target_ip_str = nullptr;
 
 #ifdef ENABLE_IPV6
     this->is_ipv6 = Endpoint::is_ipv6(ip);
@@ -759,21 +773,55 @@ int UdpEndpoint::open(const char *ip, unsigned long port, bool to_bind)
 
 #ifdef ENABLE_IPV6
     if (this->is_ipv6) {
-        /* strip square brackets from ip string */
+        /* strip square brackets from ip string(s) */
         char *ip_str = strdup(&ip[1]);
         ip_str[strlen(ip_str) - 1] = '\0';
 
+        /* remove omittable zeros from IPv6 address */
+        sockaddr_in6 ip_addr;
+        inet_pton(AF_INET6, ip_str, &ip_addr.sin6_addr);
+        inet_ntop(AF_INET6, &(ip_addr.sin6_addr), ip_str, strlen(ip));
+
+        /* do some more input validation for multicast mode */
+        if (_mode == UdpEndpoint::UdpMode::Multicast) {
+            if (nullptr == target_ip) {
+                log_error("Multicast mode needs a target IP!");
+                goto fail;
+            }
+
+            target_ip_str = strdup(&target_ip[1]);
+            target_ip_str[strlen(target_ip_str) - 1] = '\0';
+
+            if ((Endpoint::ipv6_is_multicast(target_ip_str) || Endpoint::ipv6_is_linklocal(target_ip_str))
+                && !Endpoint::ipv6_is_linklocal(ip_str)) {
+                log_error("Address must be link local, if targetAddress is multicast or link local!");
+                goto fail;
+            }
+        }
+
         sockaddr6.sin6_family = AF_INET6;
         sockaddr6.sin6_port = htons(port);
-        
+
         /* multicast address needs to listen to all, but "filter" incoming packets */
-        if (to_bind && Endpoint::ipv6_is_multicast(ip_str)) {
+        if ((_mode == UdpEndpoint::UdpMode::Eavesdropping && Endpoint::ipv6_is_multicast(ip_str)) ||
+            (_mode == UdpEndpoint::UdpMode::Multicast && Endpoint::ipv6_is_multicast(target_ip_str))) {
             sockaddr6.sin6_addr = in6addr_any;
 
-            struct ipv6_mreq group;
-            inet_pton(AF_INET6, ip_str, &group.ipv6mr_multiaddr);
+            struct ipv6_mreq group{};
+            if (_mode == UdpEndpoint::UdpMode::Multicast) {
+                inet_pton(AF_INET6, target_ip_str, &group.ipv6mr_multiaddr);
+            } else {
+                inet_pton(AF_INET6, ip_str, &group.ipv6mr_multiaddr);
+            }
             if (setsockopt(fd, IPPROTO_IPV6, IPV6_ADD_MEMBERSHIP, &group, sizeof(group)) < 0){
                 log_error("Error setting IPv6 multicast socket options (%m)");
+                goto fail;
+            }
+
+            /* disable multicast loopback */
+            bool loopch = false;
+            if (setsockopt(fd, IPPROTO_IP, IPV6_MULTICAST_LOOP, &loopch, sizeof(loopch)) < 0){
+                log_error("Error disabling IPv6 multicast loop (%m)");
                 goto fail;
             }
         } else {
@@ -785,17 +833,52 @@ int UdpEndpoint::open(const char *ip, unsigned long port, bool to_bind)
             sockaddr6.sin6_scope_id = ipv6_get_scope_id(ip_str);
         }
 
+        /* for multicast mode: set fixed outgoing address */
+        if (_mode == UdpEndpoint::UdpMode::Multicast) {
+            memcpy(&sockaddr6_out, &sockaddr6, sizeof(sockaddr6_out));
+        }
+
         free(ip_str);
     } else {
 #endif
     sockaddr.sin_family = AF_INET;
-    sockaddr.sin_addr.s_addr = inet_addr(ip);
     sockaddr.sin_port = htons(port);
+
+    if ((_mode == UdpEndpoint::UdpMode::Eavesdropping && Endpoint::ipv4_is_multicast(ip)) ||
+        (_mode == UdpEndpoint::UdpMode::Multicast && Endpoint::ipv4_is_multicast(target_ip))) {
+        sockaddr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        struct ip_mreq group{};
+        if (_mode == UdpMode::Multicast) {
+            inet_pton(AF_INET, target_ip, &group.imr_multiaddr);
+        } else {
+            inet_pton(AF_INET, ip, &group.imr_multiaddr);
+        }
+        group.imr_interface.s_addr = htonl(INADDR_ANY);
+        if (setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &group, sizeof(group)) < 0){
+            log_error("Error setting IPv4 multicast socket options (%m)");
+            goto fail;
+        }
+
+        /* disable multicast loopback */
+        bool loopch = false;
+        if (setsockopt(fd, IPPROTO_IP, IP_MULTICAST_LOOP, &loopch, sizeof(loopch)) < 0){
+            log_error("Error disabling IPv4 multicast loop (%m)");
+            goto fail;
+        }
+    } else {
+        sockaddr.sin_addr.s_addr = inet_addr(ip);
+    }
+
+    /* for multicast mode: set fixed outgoing address */
+    if (_mode == UdpEndpoint::UdpMode::Multicast) {
+        memcpy(&sockaddr_out, &sockaddr, sizeof(sockaddr_out));
+    }
 #ifdef ENABLE_IPV6
     }
 #endif
 
-    if (to_bind) {
+    if (_mode == UdpEndpoint::UdpMode::Eavesdropping || _mode == UdpEndpoint::UdpMode::Multicast) {
 #ifdef ENABLE_IPV6
         if (this->is_ipv6) {
             if (bind(fd, (struct sockaddr *)&sockaddr6, sizeof(sockaddr6)) < 0) {
@@ -823,7 +906,7 @@ int UdpEndpoint::open(const char *ip, unsigned long port, bool to_bind)
         goto fail;
     }
 
-    if (to_bind) {
+    if (_mode == UdpEndpoint::UdpMode::Eavesdropping) {
 #ifdef ENABLE_IPV6
         if (this->is_ipv6) {
             sockaddr6.sin6_port = 0;
@@ -833,8 +916,25 @@ int UdpEndpoint::open(const char *ip, unsigned long port, bool to_bind)
 #ifdef ENABLE_IPV6
         }
 #endif
+    } else {
+        if (_mode == UdpEndpoint::UdpMode::Multicast) {
+#ifdef ENABLE_IPV6
+            if (this->is_ipv6) {
+                inet_pton(AF_INET6, target_ip_str, &sockaddr6_out.sin6_addr);
+            } else {
+#endif
+            inet_pton(AF_INET, target_ip, &sockaddr_out.sin_addr);
+#ifdef ENABLE_IPV6
+            }
+#endif
+        }
     }
-    log_info("Open UDP [%d] %s:%lu %c", fd, ip, port, to_bind ? '*' : ' ');
+
+    if (_mode == UdpEndpoint::UdpMode::Multicast) {
+        log_info("Open UDP [%d] %s:%lu target %s", fd, ip, port, target_ip);
+    } else {
+        log_info("Open UDP [%d] %s:%lu %c", fd, ip, port, _mode != UdpEndpoint::UdpMode::Normal ? '*' : ' ');
+    }
 
     return fd;
 
@@ -899,10 +999,18 @@ int UdpEndpoint::write_msg(const struct buffer *pbuf)
     ssize_t r = 0;
 #ifdef ENABLE_IPV6
     if (this->is_ipv6) {
-        r = ::sendto(fd, pbuf->data, pbuf->len, 0, (struct sockaddr *)&sockaddr6, sizeof(sockaddr6));
+        if (_mode == UdpEndpoint::UdpMode::Multicast) {
+            r = ::sendto(fd, pbuf->data, pbuf->len, 0, (struct sockaddr *)&sockaddr6_out, sizeof(sockaddr6_out));
+        } else {
+            r = ::sendto(fd, pbuf->data, pbuf->len, 0, (struct sockaddr *)&sockaddr6, sizeof(sockaddr6));
+        }
     } else {
 #endif
-    r = ::sendto(fd, pbuf->data, pbuf->len, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+    if (_mode == UdpEndpoint::UdpMode::Multicast) {
+        r = ::sendto(fd, pbuf->data, pbuf->len, 0, (struct sockaddr *)&sockaddr_out, sizeof(sockaddr_out));
+    } else {
+        r = ::sendto(fd, pbuf->data, pbuf->len, 0, (struct sockaddr *)&sockaddr, sizeof(sockaddr));
+    }
 #ifdef ENABLE_IPV6
     }
 #endif
