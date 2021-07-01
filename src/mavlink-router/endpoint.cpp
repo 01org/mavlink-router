@@ -337,6 +337,14 @@ bool Endpoint::accept_msg(int target_sysid, int target_compid, uint8_t src_sysid
         return false;
     }
 
+    if (msg_id != UINT32_MAX && 
+        _allow_compID_outgoing_filter.size() > 0 && 
+        std::find(_allow_compID_outgoing_filter.begin(), _allow_compID_outgoing_filter.end(), src_compid) == _allow_compID_outgoing_filter.end()) {
+
+        // if component filter is defined and message is not in the set then discard it
+        return false;
+    }
+
     // Message is broadcast on sysid or sysid is non-existent: accept msg
     if (target_sysid == 0 || target_sysid == -1)
         return true;

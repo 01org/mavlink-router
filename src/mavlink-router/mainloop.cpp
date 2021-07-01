@@ -415,6 +415,22 @@ bool Mainloop::add_endpoints(Mainloop &mainloop, struct options *opt)
                     return false;
             }
 
+            if (conf->filter) {
+                char *token = strtok(conf->filter, ",");
+                while (token != NULL) {
+                    uart->add_message_to_filter(atoi(token));
+                    token = strtok(NULL, ",");
+                } 
+            }
+
+            if (conf->filterAllowSrcCompOut) {
+                char *token = strtok(conf->filterAllowSrcCompOut, ",");
+                while (token != NULL) {
+                    uart->add_to_allow_compID_outgoing_filter(atoi(token));
+                    token = strtok(NULL, ",");
+                }
+            }
+
             g_endpoints[i] = uart.release();
             mainloop.add_fd(g_endpoints[i]->fd, g_endpoints[i], EPOLLIN);
             i++;
@@ -435,6 +451,14 @@ bool Mainloop::add_endpoints(Mainloop &mainloop, struct options *opt)
                 } 
             }
 
+            if (conf->filterAllowSrcCompOut) {
+                char *token = strtok(conf->filterAllowSrcCompOut, ",");
+                while (token != NULL) {
+                    udp->add_to_allow_compID_outgoing_filter(atoi(token));
+                    token = strtok(NULL, ",");
+                }
+            }
+
             g_endpoints[i] = udp.release();
             mainloop.add_fd(g_endpoints[i]->fd, g_endpoints[i], EPOLLIN);
             i++;
@@ -449,6 +473,22 @@ bool Mainloop::add_endpoints(Mainloop &mainloop, struct options *opt)
                     _add_tcp_retry(tcp.release());
                 }
                 continue;
+            }
+
+            if (conf->filter) {
+                char *token = strtok(conf->filter, ",");
+                while (token != NULL) {
+                    tcp->add_message_to_filter(atoi(token));
+                    token = strtok(NULL, ",");
+                } 
+            }
+
+            if (conf->filterAllowSrcCompOut) {
+                char *token = strtok(conf->filterAllowSrcCompOut, ",");
+                while (token != NULL) {
+                    tcp->add_to_allow_compID_outgoing_filter(atoi(token));
+                    token = strtok(NULL, ",");
+                }
             }
 
             if (_add_tcp_endpoint(tcp.get()) < 0) {

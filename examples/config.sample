@@ -69,6 +69,17 @@
 #       defining if flow control should be enabled
 #       Default: false
 #
+#   Filter
+#       Comma separated list of message IDs to transmit to this endpoint
+#       No default value. All message IDs will be accepted, when not
+#       specified.
+#
+#   FilterAllowSrcCompOut
+#       Comma separated list of source component IDs from which messages
+#       should be to transmitted to this endpoint
+#       No default value. All component IDs will be accepted, when not
+#       specified.
+#
 #
 # Section [UdpEndpoint]: This section must have a name
 #
@@ -93,6 +104,17 @@
 #       Default value: Increasing value, starting from 14550, when
 #       mode is `Normal`. Must be defined if on `Eavesdropping` mode.
 #
+#   Filter
+#       Comma separated list of message IDs to transmit to this endpoint
+#       No default value. All message IDs will be accepted, when not
+#       specified.
+#
+#   FilterAllowSrcCompOut
+#       Comma separated list of source component IDs from which messages
+#       should be to transmitted to this endpoint
+#       No default value. All component IDs will be accepted, when not
+#       specified.
+#
 # Section [TcpEndpoint]: This section must have a name
 #
 # Keys:
@@ -110,6 +132,17 @@
 #       to reconnect to IP in case of disconnection. A value of 0 disables
 #       reconnection.
 #       Default value: 5
+#
+#   Filter
+#       Comma separated list of message IDs to transmit to this endpoint
+#       No default value. All message IDs will be accepted, when not
+#       specified.
+#
+#   FilterAllowSrcCompOut
+#       Comma separated list of source component IDs from which messages
+#       should be to transmitted to this endpoint
+#       No default value. All component IDs will be accepted, when not
+#       specified.
 #
 # Following, an example of configuration file:
 [General]

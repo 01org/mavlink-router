@@ -99,6 +99,7 @@ public:
     bool accept_msg(int target_sysid, int target_compid, uint8_t src_sysid, uint8_t src_compid, uint32_t msg_id);
 
     void add_message_to_filter(uint32_t msg_id) { _message_filter.push_back(msg_id); }
+    void add_to_allow_compID_outgoing_filter(uint32_t src_comp_id) { _allow_compID_outgoing_filter.push_back(src_comp_id); }
 
     struct buffer rx_buf;
     struct buffer tx_buf;
@@ -142,6 +143,7 @@ protected:
 
 private:
     std::vector<uint32_t> _message_filter;
+    std::vector<uint8_t> _allow_compID_outgoing_filter;
 };
 
 class UartEndpoint : public Endpoint {
