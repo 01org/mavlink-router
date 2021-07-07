@@ -192,7 +192,6 @@ int ULog::write_msg(const struct buffer *buffer)
         _send_msg(&msg, _target_system_id);
         /* message will be handled by MAVLINK_MSG_ID_LOGGING_DATA case */
     }
-        /* fall through */
     case MAVLINK_MSG_ID_LOGGING_DATA: {
         if (trimmed_zeros) {
             mavlink_logging_data_t ulog_data;
